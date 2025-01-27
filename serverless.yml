@@ -1,0 +1,51 @@
+service: aws-step-functions-lambdas
+
+provider:
+  name: aws
+  runtime: python3.8
+  region: sa-east-1
+  environment:
+    BUCKET_NAME: accident-data-bucket
+    DB_HOST: postgres-docker  # Nome do contêiner Docker
+    DB_PORT: 5432
+    DB_NAME: postgres
+    DB_USER: postgres
+    DB_PASSWORD: password
+
+functions:
+  lambda1:
+    handler: app.lambda_handler
+    image:
+      name: lambda1
+      dockerfile: ./lambda1/Dockerfile
+    environment:
+      BUCKET_NAME: ${env:BUCKET_NAME}
+
+  lambda2:
+    handler: app.lambda_handler
+    image:
+      name: lambda2
+      dockerfile: ./lambda2/Dockerfile
+    environment:
+      DB_HOST: ${env:DB_HOST}
+      DB_PORT: ${env:DB_PORT}
+      DB_NAME: ${env:DB_NAME}
+      DB_USER: ${env:DB_USER}
+      DB_PASSWORD: ${env:DB_PASSWORD}
+
+stepFunctions:
+  stateMachines:
+    AccidentDataPipeline:
+      definition:
+        Comment: "Pipeline para processar dados de acidentes"
+        StartAt: Lambda1
+        States:
+          Lambda1:
+            Type: Task
+            Resource: !GetAtt lambda1.Arn
+            Next: Lambda2
+          Lambda2:
+            Type: Task
+            Resource: !GetAtt lambda2.Arn
+            End: true
+      name: AccidentDataPipeline
