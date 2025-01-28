@@ -1,8 +1,13 @@
 import boto3
-import csv
-import psycopg2
 import os
-from datetime import datetime
+import pandas as pd
+from dotenv import load_dotenv
+from io import BytesIO
+from sqlalchemy import create_engine
+
+load_dotenv(dotenv_path=os.getcwd() + '/credentials.env')
+# event = {'bucket_name': os.getenv('BUCKET_NAME'), 'file_name': 'data.csv'}
+
 
 def lambda_handler(event, context):
     # Informações do S3 recebidas da Lambda 1
@@ -10,40 +15,56 @@ def lambda_handler(event, context):
     file_name = event['file_name']
 
     # Conexão ao S3
-    s3 = boto3.client('s3')
-    obj = s3.get_object(Bucket=bucket_name, Key=file_name)
-    rows = csv.DictReader(obj['Body'].read().decode('utf-8').splitlines())
-
-    # Filtrar e calcular os dados necessários
-    vehicles = ['automovel', 'bicicleta', 'caminhao', 'moto', 'onibus']
-    results = []
-    for row in rows:
-        if row['vehicle'] in vehicles:
-            results.append({
-                "created_at": datetime.now().isoformat(),
-                "road_name": row['road_name'],
-                "vehicle": row['vehicle'],
-                "number_deaths": int(row['deaths'])
-            })
-
-    # Conexão ao banco de dados PostgreSQL em contêiner Docker
-    conn = psycopg2.connect(
-        host=os.getenv('DB_HOST', 'localhost'),
-        port=os.getenv('DB_PORT', '5432'),
-        database=os.getenv('DB_NAME', 'postgres'),
-        user=os.getenv('DB_USER', 'postgres'),
-        password=os.getenv('DB_PASSWORD', 'password')
+    s3 = boto3.client(
+        's3',
+        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+        region_name=os.getenv('AWS_REGION')
     )
-    cursor = conn.cursor()
+    obj = s3.get_object(Bucket=bucket_name, Key=file_name)
 
-    # Inserir os resultados na tabela do banco de dados
-    for result in results:
-        cursor.execute("""
-            INSERT INTO accidents (created_at, road_name, vehicle, number_deaths)
-            VALUES (%s, %s, %s, %s)
-        """, (result['created_at'], result['road_name'], result['vehicle'], result['number_deaths']))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    toread = BytesIO(obj['Body'].read())
+    df = pd.read_csv(toread, sep=';', encoding='latin1', low_memory=False)
 
-    return {"message": "Dados processados e salvos com sucesso!", "rows_inserted": len(results)}
+    # Tratamento dos dados para inserção no banco
+    output_df = pd.DataFrame(columns=['created_at', 'road_name', 'vehicle', 'number_deaths'])
+    df_filtered = df[df['mortos'] > 0]
+    number_of_deaths = 0
+    
+    for index, row in df_filtered.iterrows():
+        if row['automovel'] > 0 or row['bicicleta'] > 0 or row['caminhao'] > 0 or row['moto'] > 0 or row['onibus'] > 0:
+            number_of_deaths += row['mortos']
+
+        vehicles_involved = ''
+        if row['automovel'] > 0:
+            vehicles_involved += 'automovel,'
+        if row['bicicleta'] > 0:
+            vehicles_involved += 'bicicleta,'
+        if row['caminhao'] > 0:
+            vehicles_involved += 'caminhao,'
+        if row['moto'] > 0:
+            vehicles_involved += 'moto,'
+        if row['onibus'] > 0:
+            vehicles_involved += 'onibus,'
+        vehicles_involved = vehicles_involved[:-1]
+
+        row_info = {
+            'created_at': pd.to_datetime(row['data'] + ' ' + row['horario'], format='%d/%m/%Y %H:%M:%S'),
+            'road_name': row['via'],
+            'vehicle': vehicles_involved,
+            'number_deaths': row['mortos']
+        }
+
+        output_row = pd.DataFrame(row_info, index=[0])
+        output_df = pd.concat([output_df, output_row], ignore_index=True)
+    
+    to_show = (f'Total de {number_of_deaths} mortes envolvendo os seguintes veículos: automovel, bicicleta, caminhao, moto e onibus.
+          nas vias: {output_df["road_name"].unique()}')
+
+    # Conexão ao banco de dados PostgreSQL em contêiner Docker local e inserção de dados no banco
+    engine = create_engine(
+        f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+    )
+    output_df.to_sql('fatal_accidents', engine, if_exists='replace', index=False)
+
+    return {"message": "Dados processados e salvos com sucesso!", "Informação geral": to_show}
